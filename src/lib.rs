@@ -4,6 +4,8 @@
 //! boundaries are the reusable part; production storage adapters can replace
 //! the maps and byte buffers without changing the HTTP contract.
 
+pub mod protocol;
+
 use std::{
     collections::HashMap,
     env,
@@ -370,6 +372,11 @@ async fn claim_tunnel(
     let mut tunnels = state.inner.write().await;
     let tunnel = tunnels.get_mut(&tunnel_id).ok_or(ApiError::NotFound)?;
     ensure_active(tunnel)?;
+    authorize(
+        tunnel,
+        protocol::Principal::PairingSecret,
+        protocol::Operation::Claim,
+    )?;
     let expected = tunnel.pairing_hash.ok_or(ApiError::Conflict)?;
     if !hashes_equal(&expected, &supplied) {
         return Err(ApiError::Unauthorized);
@@ -394,7 +401,7 @@ async fn get_tunnel(
     let tunnels = state.inner.read().await;
     let tunnel = tunnels.get(&tunnel_id).ok_or(ApiError::NotFound)?;
     ensure_active(tunnel)?;
-    require_either(tunnel, &supplied)?;
+    require_either(tunnel, &supplied, protocol::Operation::ReadSnapshot)?;
     let mut files: Vec<_> = tunnel
         .files
         .values()
@@ -417,9 +424,11 @@ async fn cancel_tunnel(
     let supplied = bearer_hash(&headers)?;
     let mut tunnels = state.inner.write().await;
     let tunnel = tunnels.get_mut(&tunnel_id).ok_or(ApiError::NotFound)?;
-    require_desktop(tunnel, &supplied)?;
+    ensure_active(tunnel)?;
+    require_desktop(tunnel, &supplied, protocol::Operation::Cancel)?;
     tunnel.status = TunnelStatus::Cancelled;
     tunnel.files.clear();
+    tunnel.event_tickets.clear();
     publish(tunnel, "tunnel.cancelled", None, None, None);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -435,7 +444,7 @@ async fn declare_file(
     let mut tunnels = state.inner.write().await;
     let tunnel = tunnels.get_mut(&tunnel_id).ok_or(ApiError::NotFound)?;
     ensure_active(tunnel)?;
-    require_phone(tunnel, &supplied)?;
+    require_phone(tunnel, &supplied, protocol::Operation::DeclareFile)?;
     if tunnel.files.len() >= usize::from(tunnel.max_files) {
         return Err(ApiError::TooLarge);
     }
@@ -490,7 +499,7 @@ async fn upload_file(
         let mut tunnels = state.inner.write().await;
         let tunnel = tunnels.get_mut(&tunnel_id).ok_or(ApiError::NotFound)?;
         ensure_active(tunnel)?;
-        require_phone(tunnel, &supplied)?;
+        require_phone(tunnel, &supplied, protocol::Operation::UploadFile)?;
         let stored = tunnel.files.get_mut(&file_id).ok_or(ApiError::NotFound)?;
         if stored.content.is_some() {
             return Err(ApiError::Conflict);
@@ -504,7 +513,7 @@ async fn upload_file(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| ApiError::Invalid("invalid request body"))?;
         let next_size = bytes.len().saturating_add(chunk.len());
-        if next_size as u64 > expected_size {
+        if !protocol::progress_is_valid(expected_size, next_size as u64) {
             return Err(ApiError::TooLarge);
         }
         bytes.extend_from_slice(&chunk);
@@ -551,12 +560,20 @@ async fn download_file(
     let mut tunnels = state.inner.write().await;
     let tunnel = tunnels.get_mut(&tunnel_id).ok_or(ApiError::NotFound)?;
     ensure_active(tunnel)?;
-    require_desktop(tunnel, &supplied)?;
+    require_desktop(tunnel, &supplied, protocol::Operation::DownloadFile)?;
     let stored = tunnel.files.get_mut(&file_id).ok_or(ApiError::NotFound)?;
     let content = stored.content.clone().ok_or(ApiError::Conflict)?;
     let media_type = HeaderValue::from_str(&stored.descriptor.media_type)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
     stored.descriptor.status = FileStatus::Downloaded;
+    if tunnel
+        .files
+        .values()
+        .all(|file| file.descriptor.status == FileStatus::Downloaded)
+    {
+        tunnel.status = TunnelStatus::Complete;
+        tunnel.event_tickets.clear();
+    }
     publish(
         tunnel,
         "file.downloaded",
@@ -576,7 +593,7 @@ async fn create_event_ticket(
     let mut tunnels = state.inner.write().await;
     let tunnel = tunnels.get_mut(&tunnel_id).ok_or(ApiError::NotFound)?;
     ensure_active(tunnel)?;
-    require_either(tunnel, &supplied)?;
+    require_either(tunnel, &supplied, protocol::Operation::MintEventTicket)?;
     let ticket = token();
     let expires_at = Utc::now() + chrono::Duration::seconds(EVENT_TICKET_SECONDS);
     tunnel.event_tickets.insert(token_hash(&ticket), expires_at);
@@ -595,6 +612,11 @@ async fn connect_events(
     let mut tunnels = state.inner.write().await;
     let tunnel = tunnels.get_mut(&tunnel_id).ok_or(ApiError::NotFound)?;
     ensure_active(tunnel)?;
+    authorize(
+        tunnel,
+        protocol::Principal::EventTicket,
+        protocol::Operation::RedeemEventTicket,
+    )?;
     let supplied = token_hash(&query.ticket);
     let ticket_hash = tunnel
         .event_tickets
@@ -689,32 +711,58 @@ fn bearer_hash(headers: &HeaderMap) -> Result<[u8; 32], ApiError> {
     Ok(token_hash(value))
 }
 
-fn require_desktop(tunnel: &Tunnel, supplied: &[u8; 32]) -> Result<(), ApiError> {
-    hashes_equal(&tunnel.desktop_hash, supplied)
+fn authorize(
+    tunnel: &Tunnel,
+    principal: protocol::Principal,
+    operation: protocol::Operation,
+) -> Result<(), ApiError> {
+    protocol::permits(tunnel.status, principal, operation)
         .then_some(())
-        .ok_or(ApiError::Unauthorized)
+        .ok_or(ApiError::Conflict)
 }
 
-fn require_phone(tunnel: &Tunnel, supplied: &[u8; 32]) -> Result<(), ApiError> {
-    tunnel
+fn require_desktop(
+    tunnel: &Tunnel,
+    supplied: &[u8; 32],
+    operation: protocol::Operation,
+) -> Result<(), ApiError> {
+    if !hashes_equal(&tunnel.desktop_hash, supplied) {
+        return Err(ApiError::Unauthorized);
+    }
+    authorize(tunnel, protocol::Principal::Desktop, operation)
+}
+
+fn require_phone(
+    tunnel: &Tunnel,
+    supplied: &[u8; 32],
+    operation: protocol::Operation,
+) -> Result<(), ApiError> {
+    if !tunnel
         .phone_hash
         .as_ref()
         .is_some_and(|expected| hashes_equal(expected, supplied))
-        .then_some(())
-        .ok_or(ApiError::Unauthorized)
+    {
+        return Err(ApiError::Unauthorized);
+    }
+    authorize(tunnel, protocol::Principal::Phone, operation)
 }
 
-fn require_either(tunnel: &Tunnel, supplied: &[u8; 32]) -> Result<(), ApiError> {
-    if hashes_equal(&tunnel.desktop_hash, supplied)
-        || tunnel
-            .phone_hash
-            .as_ref()
-            .is_some_and(|expected| hashes_equal(expected, supplied))
-    {
-        Ok(())
-    } else {
-        Err(ApiError::Unauthorized)
+fn require_either(
+    tunnel: &Tunnel,
+    supplied: &[u8; 32],
+    operation: protocol::Operation,
+) -> Result<(), ApiError> {
+    if hashes_equal(&tunnel.desktop_hash, supplied) {
+        return authorize(tunnel, protocol::Principal::Desktop, operation);
     }
+    if tunnel
+        .phone_hash
+        .as_ref()
+        .is_some_and(|expected| hashes_equal(expected, supplied))
+    {
+        return authorize(tunnel, protocol::Principal::Phone, operation);
+    }
+    Err(ApiError::Unauthorized)
 }
 
 fn publish(

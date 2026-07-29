@@ -9,7 +9,9 @@ pkgs.mkShell {
     clippy
     git
     jq
+    jdk21_headless
     nixfmt
+    nodejs_22
     openssl
     pkg-config
     ripgrep

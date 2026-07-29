@@ -4,3 +4,5 @@
 *.profraw
 .cache/
 .direnv/
+.formal-artifacts/
+_apalache-out/

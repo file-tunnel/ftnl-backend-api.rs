@@ -53,9 +53,14 @@ publication, and delete expired objects through a durable sweeper.
 
 ```bash
 nix develop --command agent-check
+bash scripts/formal-check.sh all
 ```
 
 `flake.lock` pins the complete developer toolchain. CI also runs the native
 Rust workflow so the Nix and upstream stable Rust paths remain compatible.
+The dedicated formal-methods workflow runs randomized Rust transition
+properties, Kani proofs over the production capability policy, and exhaustive
+TLC verification of the finite Quint model. See
+[`formal/README.md`](formal/README.md) for the invariants and proof boundary.
 
 MIT licensed.

@@ -1,0 +1,82 @@
+name: Formal methods
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-methods-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  protocol-model:
+    name: Quint simulation and exhaustive TLC model check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: Typecheck, simulate, and exhaustively verify
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p .formal-artifacts
+          nix develop --command bash scripts/formal-check.sh check 2>&1 \
+            | tee .formal-artifacts/quint-typecheck.log
+          nix develop --command bash scripts/formal-check.sh simulate 2>&1 \
+            | tee .formal-artifacts/quint-simulation.log
+          nix develop --command bash scripts/formal-check.sh verify 2>&1 \
+            | tee .formal-artifacts/quint-tlc.log
+      - name: Upload model-checker logs and manifest
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: file-tunnel-formal-model
+          path: |
+            .formal-artifacts/
+            formal/fm.toml
+            formal/file_tunnel_protocol.qnt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  rust-properties:
+    name: Rust randomized transition properties
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - run: nix develop --command cargo test --locked --test proptest_protocol
+
+  kani:
+    name: Kani bounded Rust proofs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install pinned Kani verifier
+        run: |
+          cargo install --locked kani-verifier --version 0.67.0
+          cargo kani setup
+      - name: Prove capability and lifecycle harnesses
+        run: cargo kani
