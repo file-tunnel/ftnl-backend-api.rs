@@ -94,3 +94,12 @@ jobs:
           while IFS= read -r tag; do
             cosign sign --yes "${tag}@${DIGEST}"
           done <<< "$TAGS"
+
+      - name: Make the linked GHCR package public
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method PATCH \
+            /orgs/file-tunnel/packages/container/ftnl-backend-api \
+            -f visibility=public
