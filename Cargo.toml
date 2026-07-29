@@ -1,0 +1,26 @@
+[package]
+name = "ftnl-backend-api"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Secure ephemeral cross-device file tunnel API"
+repository = "https://github.com/file-tunnel/ftnl-backend-api.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+bytes = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tower-http = { version = "0.6", features = ["cors", "request-id", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
