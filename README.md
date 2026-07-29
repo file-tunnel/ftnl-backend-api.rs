@@ -30,6 +30,7 @@ canonical contract.
 ## Run
 
 ```bash
+nix develop
 cp .env.example .env
 cargo run
 ```
@@ -51,9 +52,10 @@ publication, and delete expired objects through a durable sweeper.
 ## Validate
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+nix develop --command agent-check
 ```
+
+`flake.lock` pins the complete developer toolchain. CI also runs the native
+Rust workflow so the Nix and upstream stable Rust paths remain compatible.
 
 MIT licensed.

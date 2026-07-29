@@ -1,0 +1,37 @@
+name: nix
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Check Nix formatting
+        run: nix fmt -- --check flake.nix .nix/devshell.nix
+      - name: Lint shell and workflows
+        run: |
+          nix develop --command shellcheck .nix/agent-check.sh
+          nix develop --command shfmt -d -i 2 -ci .nix/agent-check.sh
+          nix develop --command actionlint
+      - name: Evaluate flake
+        run: nix flake check --print-build-logs
+      - name: Run repository checks
+        run: nix develop --command agent-check
