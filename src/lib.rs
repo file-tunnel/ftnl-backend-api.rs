@@ -528,8 +528,7 @@ async fn upload_file(
         }
         None => resumable::ContentRange::whole(expected_size),
     };
-    let expected_chunk_len =
-        usize::try_from(range.len()).map_err(|_| ApiError::TooLarge)?;
+    let expected_chunk_len = usize::try_from(range.len()).map_err(|_| ApiError::TooLarge)?;
     let mut bytes = BytesMut::with_capacity(expected_chunk_len.min(MAX_CHUNK_PREALLOCATE_BYTES));
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
@@ -558,7 +557,10 @@ async fn upload_file(
     let (outcome, became_complete) = {
         let stored = tunnel.files.get_mut(&file_id).ok_or(ApiError::NotFound)?;
         let was_complete = stored.upload.is_complete();
-        let outcome = stored.upload.append(range, &bytes).map_err(map_upload_error)?;
+        let outcome = stored
+            .upload
+            .append(range, &bytes)
+            .map_err(map_upload_error)?;
         if !outcome.replayed {
             stored.descriptor.bytes_transferred = outcome.offset;
             stored.descriptor.status = if outcome.complete {

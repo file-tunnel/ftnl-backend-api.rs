@@ -39,9 +39,7 @@ impl ContentRange {
         let remainder = value
             .strip_prefix("bytes ")
             .ok_or(RangeError::InvalidUnit)?;
-        let (bounds, total) = remainder
-            .split_once('/')
-            .ok_or(RangeError::InvalidSyntax)?;
+        let (bounds, total) = remainder.split_once('/').ok_or(RangeError::InvalidSyntax)?;
         if total.contains('/') || bounds.contains(',') || total == "*" || bounds == "*" {
             return Err(RangeError::UnsupportedWildcard);
         }
@@ -52,9 +50,7 @@ impl ContentRange {
                 actual: total,
             });
         }
-        let (start, end_inclusive) = bounds
-            .split_once('-')
-            .ok_or(RangeError::InvalidSyntax)?;
+        let (start, end_inclusive) = bounds.split_once('-').ok_or(RangeError::InvalidSyntax)?;
         if end_inclusive.contains('-') {
             return Err(RangeError::InvalidSyntax);
         }
@@ -109,9 +105,9 @@ impl Display for RangeError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidUnit => formatter.write_str("Content-Range must use the `bytes` unit"),
-            Self::InvalidSyntax => formatter.write_str(
-                "Content-Range must use `bytes START-END/TOTAL` syntax",
-            ),
+            Self::InvalidSyntax => {
+                formatter.write_str("Content-Range must use `bytes START-END/TOTAL` syntax")
+            }
             Self::InvalidNumber => {
                 formatter.write_str("Content-Range offsets must be unsigned decimal integers")
             }
@@ -228,8 +224,8 @@ impl UploadBuffer {
                 });
             }
             let start = usize::try_from(range.start).map_err(|_| UploadError::ChunkTooLarge)?;
-            let end = usize::try_from(range.end_exclusive)
-                .map_err(|_| UploadError::ChunkTooLarge)?;
+            let end =
+                usize::try_from(range.end_exclusive).map_err(|_| UploadError::ChunkTooLarge)?;
             if self.bytes.get(start..end) != Some(chunk) {
                 return Err(UploadError::ConflictingReplay {
                     start: range.start,
@@ -347,7 +343,10 @@ mod tests {
                 total: 100,
             })
         );
-        assert_eq!(ContentRange::parse("items 0-9/10", 10), Err(RangeError::InvalidUnit));
+        assert_eq!(
+            ContentRange::parse("items 0-9/10", 10),
+            Err(RangeError::InvalidUnit)
+        );
         assert_eq!(
             ContentRange::parse("bytes 0-9/11", 10),
             Err(RangeError::TotalMismatch {
@@ -407,7 +406,10 @@ mod tests {
     fn conflicting_retry_and_partial_overlap_fail_closed() {
         let mut upload = UploadBuffer::new(6);
         upload
-            .append(ContentRange::parse("bytes 0-2/6", 6).expect("range"), b"abc")
+            .append(
+                ContentRange::parse("bytes 0-2/6", 6).expect("range"),
+                b"abc",
+            )
             .expect("first append");
         assert!(matches!(
             upload.append(
@@ -430,10 +432,7 @@ mod tests {
     fn gaps_and_wrong_body_lengths_do_not_mutate_state() {
         let mut upload = UploadBuffer::new(6);
         assert!(matches!(
-            upload.append(
-                ContentRange::parse("bytes 3-5/6", 6).expect("gap"),
-                b"def"
-            ),
+            upload.append(ContentRange::parse("bytes 3-5/6", 6).expect("gap"), b"def"),
             Err(UploadError::Gap { .. })
         ));
         assert!(matches!(
