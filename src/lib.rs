@@ -5,6 +5,7 @@
 //! the maps and byte buffers without changing the HTTP contract.
 
 pub mod protocol;
+pub mod resumable;
 
 use std::{
     collections::HashMap,
@@ -19,7 +20,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
@@ -43,6 +44,9 @@ const DEFAULT_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const DEFAULT_EXPIRES_SECONDS: u32 = 600;
 const MAX_EXPIRES_SECONDS: u32 = 3600;
 const EVENT_TICKET_SECONDS: i64 = 30;
+const MAX_CHUNK_PREALLOCATE_BYTES: usize = 8 * 1024 * 1024;
+const UPLOAD_OFFSET: HeaderName = HeaderName::from_static("upload-offset");
+const UPLOAD_COMPLETE: HeaderName = HeaderName::from_static("upload-complete");
 
 #[derive(Clone)]
 pub struct AppState {
@@ -85,7 +89,7 @@ struct Tunnel {
 
 struct StoredFile {
     descriptor: FileDescriptor,
-    content: Option<Bytes>,
+    upload: resumable::UploadBuffer,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -209,6 +213,10 @@ struct Health {
 enum ApiError {
     #[error("invalid request: {0}")]
     Invalid(&'static str),
+    #[error("invalid upload range: {0}")]
+    InvalidRange(String),
+    #[error("upload offset conflict: {0}")]
+    UploadConflict(String),
     #[error("capability is missing or invalid")]
     Unauthorized,
     #[error("tunnel or file was not found")]
@@ -236,10 +244,15 @@ struct Problem {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, title, code) = match self {
-            Self::Invalid(_) => (
+            Self::Invalid(_) | Self::InvalidRange(_) => (
                 StatusCode::BAD_REQUEST,
                 "Invalid request",
                 "invalid_request",
+            ),
+            Self::UploadConflict(_) => (
+                StatusCode::CONFLICT,
+                "Upload offset conflict",
+                "upload_offset_conflict",
             ),
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
@@ -293,7 +306,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/tunnels/{tunnel_id}/files", post(declare_file))
         .route(
             "/v1/tunnels/{tunnel_id}/files/{file_id}/content",
-            put(upload_file).get(download_file),
+            put(upload_file).get(download_file).head(upload_status),
         )
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::new(
@@ -307,8 +320,10 @@ pub fn app(state: AppState) -> Router {
                 .allow_headers([
                     header::AUTHORIZATION,
                     header::CONTENT_TYPE,
+                    header::CONTENT_RANGE,
                     header::HeaderName::from_static("idempotency-key"),
                 ])
+                .expose_headers([UPLOAD_OFFSET, UPLOAD_COMPLETE])
                 .allow_methods(Any),
         )
         .with_state(state)
@@ -475,7 +490,7 @@ async fn declare_file(
         descriptor.file_id,
         StoredFile {
             descriptor: descriptor.clone(),
-            content: None,
+            upload: resumable::UploadBuffer::new(descriptor.size_bytes),
         },
     );
     publish(
@@ -493,62 +508,106 @@ async fn upload_file(
     Path((tunnel_id, file_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
     body: Body,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     let supplied = bearer_hash(&headers)?;
     let expected_size = {
-        let mut tunnels = state.inner.write().await;
-        let tunnel = tunnels.get_mut(&tunnel_id).ok_or(ApiError::NotFound)?;
+        let tunnels = state.inner.read().await;
+        let tunnel = tunnels.get(&tunnel_id).ok_or(ApiError::NotFound)?;
         ensure_active(tunnel)?;
         require_phone(tunnel, &supplied, protocol::Operation::UploadFile)?;
-        let stored = tunnel.files.get_mut(&file_id).ok_or(ApiError::NotFound)?;
-        if stored.content.is_some() {
-            return Err(ApiError::Conflict);
-        }
-        stored.descriptor.status = FileStatus::Uploading;
+        let stored = tunnel.files.get(&file_id).ok_or(ApiError::NotFound)?;
         stored.descriptor.size_bytes
     };
-
-    let mut bytes = BytesMut::with_capacity(expected_size.min(8 * 1024 * 1024) as usize);
+    let range = match headers.get(header::CONTENT_RANGE) {
+        Some(value) => {
+            let value = value
+                .to_str()
+                .map_err(|_| ApiError::InvalidRange("Content-Range is not ASCII".to_owned()))?;
+            resumable::ContentRange::parse(value, expected_size)
+                .map_err(|error| ApiError::InvalidRange(error.to_string()))?
+        }
+        None => resumable::ContentRange::whole(expected_size),
+    };
+    let expected_chunk_len =
+        usize::try_from(range.len()).map_err(|_| ApiError::TooLarge)?;
+    let mut bytes = BytesMut::with_capacity(expected_chunk_len.min(MAX_CHUNK_PREALLOCATE_BYTES));
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| ApiError::Invalid("invalid request body"))?;
         let next_size = bytes.len().saturating_add(chunk.len());
-        if !protocol::progress_is_valid(expected_size, next_size as u64) {
-            return Err(ApiError::TooLarge);
+        if next_size > expected_chunk_len {
+            return Err(ApiError::InvalidRange(format!(
+                "request body exceeds declared range length {}",
+                range.len()
+            )));
         }
         bytes.extend_from_slice(&chunk);
-        let mut tunnels = state.inner.write().await;
-        if let Some(tunnel) = tunnels.get_mut(&tunnel_id) {
-            if let Some(stored) = tunnel.files.get_mut(&file_id) {
-                stored.descriptor.bytes_transferred = next_size as u64;
-            }
-            publish(
-                tunnel,
-                "file.progress",
-                Some(file_id),
-                Some(next_size as u64),
-                None,
-            );
-        }
     }
-    if bytes.len() as u64 != expected_size {
-        return Err(ApiError::Conflict);
+    if bytes.len() != expected_chunk_len {
+        return Err(ApiError::InvalidRange(format!(
+            "request body contains {} bytes; range requires {}",
+            bytes.len(),
+            range.len()
+        )));
     }
 
     let mut tunnels = state.inner.write().await;
     let tunnel = tunnels.get_mut(&tunnel_id).ok_or(ApiError::NotFound)?;
-    let stored = tunnel.files.get_mut(&file_id).ok_or(ApiError::NotFound)?;
-    stored.content = Some(bytes.freeze());
-    stored.descriptor.status = FileStatus::Available;
-    tunnel.status = TunnelStatus::Transferring;
-    publish(
-        tunnel,
-        "file.available",
-        Some(file_id),
-        Some(expected_size),
-        None,
-    );
-    Ok(StatusCode::NO_CONTENT)
+    ensure_active(tunnel)?;
+    require_phone(tunnel, &supplied, protocol::Operation::UploadFile)?;
+    let (outcome, became_complete) = {
+        let stored = tunnel.files.get_mut(&file_id).ok_or(ApiError::NotFound)?;
+        let was_complete = stored.upload.is_complete();
+        let outcome = stored.upload.append(range, &bytes).map_err(map_upload_error)?;
+        if !outcome.replayed {
+            stored.descriptor.bytes_transferred = outcome.offset;
+            stored.descriptor.status = if outcome.complete {
+                FileStatus::Available
+            } else {
+                FileStatus::Uploading
+            };
+        }
+        (outcome, !was_complete && outcome.complete)
+    };
+
+    if !outcome.replayed {
+        tunnel.status = TunnelStatus::Transferring;
+        publish(
+            tunnel,
+            "file.progress",
+            Some(file_id),
+            Some(outcome.offset),
+            None,
+        );
+    }
+    if became_complete {
+        publish(
+            tunnel,
+            "file.available",
+            Some(file_id),
+            Some(outcome.offset),
+            None,
+        );
+    }
+    Ok(upload_response(outcome))
+}
+
+async fn upload_status(
+    State(state): State<AppState>,
+    Path((tunnel_id, file_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let supplied = bearer_hash(&headers)?;
+    let tunnels = state.inner.read().await;
+    let tunnel = tunnels.get(&tunnel_id).ok_or(ApiError::NotFound)?;
+    ensure_active(tunnel)?;
+    require_phone(tunnel, &supplied, protocol::Operation::UploadFile)?;
+    let stored = tunnel.files.get(&file_id).ok_or(ApiError::NotFound)?;
+    Ok(upload_response(resumable::AppendOutcome {
+        offset: stored.upload.offset(),
+        complete: stored.upload.is_complete(),
+        replayed: true,
+    }))
 }
 
 async fn download_file(
@@ -562,7 +621,10 @@ async fn download_file(
     ensure_active(tunnel)?;
     require_desktop(tunnel, &supplied, protocol::Operation::DownloadFile)?;
     let stored = tunnel.files.get_mut(&file_id).ok_or(ApiError::NotFound)?;
-    let content = stored.content.clone().ok_or(ApiError::Conflict)?;
+    if !stored.upload.is_complete() {
+        return Err(ApiError::Conflict);
+    }
+    let content = Bytes::copy_from_slice(stored.upload.as_slice());
     let media_type = HeaderValue::from_str(&stored.descriptor.media_type)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
     stored.descriptor.status = FileStatus::Downloaded;
@@ -647,6 +709,39 @@ async fn event_socket(mut socket: WebSocket, mut events: broadcast::Receiver<Tun
         }
     }
     let _ = socket.close().await;
+}
+
+fn upload_response(outcome: resumable::AppendOutcome) -> Response {
+    let status = if outcome.complete {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::PERMANENT_REDIRECT
+    };
+    let mut response = status.into_response();
+    response.headers_mut().insert(
+        UPLOAD_OFFSET,
+        HeaderValue::from_str(&outcome.offset.to_string())
+            .unwrap_or_else(|_| HeaderValue::from_static("0")),
+    );
+    response.headers_mut().insert(
+        UPLOAD_COMPLETE,
+        HeaderValue::from_static(if outcome.complete { "true" } else { "false" }),
+    );
+    response
+}
+
+fn map_upload_error(error: resumable::UploadError) -> ApiError {
+    match error {
+        resumable::UploadError::BodyLength { .. } | resumable::UploadError::ChunkTooLarge => {
+            ApiError::InvalidRange(error.to_string())
+        }
+        resumable::UploadError::TotalChanged { .. }
+        | resumable::UploadError::Gap { .. }
+        | resumable::UploadError::PartialOverlap { .. }
+        | resumable::UploadError::ConflictingReplay { .. } => {
+            ApiError::UploadConflict(error.to_string())
+        }
+    }
 }
 
 fn validate_create(request: &CreateTunnelRequest) -> Result<(), ApiError> {
@@ -867,6 +962,26 @@ mod tests {
         assert!(validate_filename("IMG_0001.jpg").is_ok());
         assert!(validate_filename("../IMG_0001.jpg").is_ok());
         assert!(validate_filename("bad\nname.jpg").is_err());
+    }
+
+    #[test]
+    fn upload_responses_expose_resume_checkpoint() {
+        let partial = upload_response(resumable::AppendOutcome {
+            offset: 1024,
+            complete: false,
+            replayed: false,
+        });
+        assert_eq!(partial.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(partial.headers().get(UPLOAD_OFFSET).unwrap(), "1024");
+        assert_eq!(partial.headers().get(UPLOAD_COMPLETE).unwrap(), "false");
+
+        let complete = upload_response(resumable::AppendOutcome {
+            offset: 2048,
+            complete: true,
+            replayed: false,
+        });
+        assert_eq!(complete.status(), StatusCode::NO_CONTENT);
+        assert_eq!(complete.headers().get(UPLOAD_COMPLETE).unwrap(), "true");
     }
 
     #[tokio::test]
