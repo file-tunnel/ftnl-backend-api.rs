@@ -5,21 +5,25 @@ pkgs.mkShell {
   ]
   ++ (with pkgs; [
     actionlint
+    age
     cargo
     clippy
     git
+    just
     jq
     jdk21_headless
     nixfmt
     nodejs_22
     openssl
     pkg-config
+    pkgs.ores-sops
     ripgrep
     rust-analyzer
     rustc
     rustfmt
     shellcheck
     shfmt
+    sops
   ]);
 
   LANG = if pkgs.stdenv.hostPlatform.isDarwin then "en_US.UTF-8" else "C.UTF-8";

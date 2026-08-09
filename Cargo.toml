@@ -10,7 +10,9 @@ repository = "https://github.com/file-tunnel/ftnl-backend-api.rs"
 axum = { version = "0.8", features = ["ws"] }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+ftnl-lib-core = { git = "https://github.com/file-tunnel/ftnl-lib-core.git", rev = "7d0745452d91073a1001d9d527805ac41826f6e5" }
 futures-util = "0.3"
+next-loggers = { package = "oresoftware-next-loggers", git = "https://github.com/ores-otel/ores.otel.log.git", rev = "eb656efe232fa5128d0e5b77b81224aca835e543" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

@@ -4,6 +4,8 @@
 //! boundaries are the reusable part; production storage adapters can replace
 //! the maps and byte buffers without changing the HTTP contract.
 
+pub mod observability;
+pub mod persistence;
 pub mod protocol;
 pub mod resumable;
 
@@ -20,7 +22,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
@@ -33,7 +35,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, RwLock};
 use tower_http::{
-    cors::{Any, CorsLayer},
+    cors::{AllowOrigin, CorsLayer},
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     trace::TraceLayer,
 };
@@ -290,6 +292,7 @@ impl IntoResponse for ApiError {
 }
 
 pub fn app(state: AppState) -> Router {
+    let allowed_origin = Arc::clone(&state.portal_origin);
     Router::new()
         .route("/healthz", get(health))
         .route("/v1/tunnels", post(create_tunnel))
@@ -316,7 +319,9 @@ pub fn app(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(AllowOrigin::predicate(move |origin, _request| {
+                    origin.as_bytes() == allowed_origin.as_bytes()
+                }))
                 .allow_headers([
                     header::AUTHORIZATION,
                     header::CONTENT_TYPE,
@@ -324,7 +329,13 @@ pub fn app(state: AppState) -> Router {
                     header::HeaderName::from_static("idempotency-key"),
                 ])
                 .expose_headers([UPLOAD_OFFSET, UPLOAD_COMPLETE])
-                .allow_methods(Any),
+                .allow_methods([
+                    Method::GET,
+                    Method::HEAD,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
+                ]),
         )
         .with_state(state)
 }
@@ -941,6 +952,7 @@ pub fn token_ttl_hint() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt as _;
 
     #[test]
     fn tokens_are_opaque_and_hash_comparison_is_constant_time() {
@@ -1003,5 +1015,42 @@ mod tests {
         .unwrap();
         assert!(response.pairing_uri.contains("#c="));
         assert!(!response.pairing_uri.contains("?c="));
+    }
+
+    #[tokio::test]
+    async fn cors_allows_only_the_configured_portal_origin() {
+        async fn preflight(origin: &'static str) -> Response {
+            app(AppState::new("https://upload.file-tunnel.dev"))
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(Method::OPTIONS)
+                        .uri("/v1/tunnels")
+                        .header(header::ORIGIN, origin)
+                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+
+        let allowed = preflight("https://upload.file-tunnel.dev").await;
+        assert_eq!(
+            allowed.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&HeaderValue::from_static("https://upload.file-tunnel.dev"))
+        );
+
+        let rejected = preflight("https://attacker.example").await;
+        assert!(rejected
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+    }
+
+    #[test]
+    fn zed_package_declares_runtime_schema_and_logging_edges() {
+        let manifest = include_str!("../.zpkg.toml");
+        assert!(manifest.contains("\"file-tunnel/ftnl-lib-core\" = \"^0.1.0\""));
+        assert!(manifest.contains("\"oresoftware/next-loggers\" = \"^0.1.0\""));
     }
 }

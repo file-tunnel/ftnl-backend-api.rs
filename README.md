@@ -49,6 +49,19 @@ contract into Redis/Postgres for metadata and S3/R2/GCS multipart object
 storage, enforce authenticated application quotas, scan content before
 publication, and delete expired objects through a durable sweeper.
 
+The service-owned tunnel persistence schema is compiled by `ftnl-lib-core` and
+can produce deterministic additive bootstrap SQL for review. The generic core
+owns validation/generation mechanics; this API owns File Tunnel domain fields,
+and `ftnl-infra` owns migration review and application. Supabase's automatic
+table exposure remains disabled and every exposed table requires explicit RLS.
+
+Production environment bundles use SOPS ciphertext in `env/enc` and ignored
+plaintext in `env/dec`; create them through `nix develop --command just edit
+prod` only after rotating any credential exposed in chat or tickets. Lifecycle
+records use the ORES OpenTelemetry wrapper with constant event names only.
+Transfer IDs, capabilities, tickets, filenames, request URLs, remote addresses,
+and bytes are prohibited from those records.
+
 ## Validate
 
 ```bash

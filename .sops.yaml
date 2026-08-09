@@ -1,0 +1,10 @@
+# Commit only SOPS ciphertext under env/enc. The recipient matches the File
+# Tunnel infrastructure repository so operators can rotate all bundles together.
+keys:
+  - &op_alex_macbook age1s8lcnaxn9g77s6j4g7p24w6sgvllpue0lzrsvp3xk02k2gwjj5ssnkp39q
+
+creation_rules:
+  - path_regex: ^env/enc/.*\.env\.enc$
+    key_groups:
+      - age:
+          - *op_alex_macbook

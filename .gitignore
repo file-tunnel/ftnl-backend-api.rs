@@ -1,9 +1,23 @@
 /target/
-.env
 .DS_Store
 *.profraw
 .cache/
 .direnv/
+
+# SOPS ciphertext under env/enc is versioned. Plaintext env material is not.
+.env
+.env.*
+!.env.example
+*.env
+**/*.env
+env/dec/
+env/dec/**
+env/*.env
+**/.env**
+!env/enc/
+!env/enc/*.env.enc
+!env/template.env.example
+
 .formal-artifacts/
 _apalache-out/
 tmp
