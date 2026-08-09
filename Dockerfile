@@ -2,6 +2,7 @@ FROM rust:1.96-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
+COPY schema ./schema
 RUN cargo build --locked --release
 
 FROM gcr.io/distroless/cc-debian12:nonroot
