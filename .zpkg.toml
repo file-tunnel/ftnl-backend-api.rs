@@ -1,0 +1,38 @@
+[package]
+org = "file-tunnel"
+name = "ftnl-backend-api.rs"
+version = "0.1.0"
+description = "Secure ephemeral File Tunnel control and data-plane API"
+license = "MIT"
+keywords = ["backend", "rust", "file-transfer", "json-schema", "opentelemetry"]
+language = "rust"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/file-tunnel/ftnl-backend-api.rs"
+
+[dependencies]
+"file-tunnel/ftnl-lib-core" = "^0.1.0"
+"oresoftware/next-loggers" = "^0.1.0"
+
+[build]
+command = "cargo build --release --locked"
+outputs = ["target/release/ftnl-backend-api"]
+
+[install]
+adapter = "none"
+dir = ".vendor/.zed"
+
+[publish]
+include_readme = true
+tag_format = "v{version}"
+smoke_test = "test -x \"$ZED_PKG_TEST_TARGET/target/release/ftnl-backend-api\""
+exclude = [".env", ".env.*", "env/dec/**", ".direnv/**", ".cache/**", "target/**", "**/*.log", ".DS_Store"]
+
+[targets.rust]
+dir = "."
+name = "ftnl-backend-api-rust"
+adapter = "rust"
+
+[scripts]
+test = "nix develop --command agent-check"
