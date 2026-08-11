@@ -1,16 +1,17 @@
-//! Service-owned persistence schema compiled by the generic File Tunnel core.
+//! Service-owned persistence adapter compiled from the canonical File Tunnel core schema.
 //!
 //! This module generates reviewable bootstrap SQL. It never connects to a
 //! database or applies a migration; those effects remain operator-owned in
-//! `ftnl-infra` and the bounded DPM workflow.
+//! `ftnl-infra` and the bounded DPM workflow. The human-authored persistence
+//! contract itself is owned exclusively by `ftnl-lib-core`.
 
-use ftnl_lib_core::{generate_create_table, CanonicalSchema, SchemaError};
+use ftnl_lib_core::{
+    generate_create_table, tunnel_persistence_schema, CanonicalSchema, SchemaError,
+};
 
-const TUNNEL_SCHEMA: &str = include_str!("../schema/tunnel-persistence.schema.json");
-
-/// Compile the canonical tunnel persistence schema.
+/// Compile the canonical tunnel persistence schema owned by `ftnl-lib-core`.
 pub fn tunnel_schema() -> Result<CanonicalSchema, SchemaError> {
-    CanonicalSchema::from_json(TUNNEL_SCHEMA)
+    CanonicalSchema::from_json(tunnel_persistence_schema())
 }
 
 /// Produce additive, deterministic PostgreSQL bootstrap DDL for review.
