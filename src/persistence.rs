@@ -11,7 +11,7 @@ use ftnl_lib_core::{
 
 /// Compile the canonical tunnel persistence schema owned by `ftnl-lib-core`.
 pub fn tunnel_schema() -> Result<CanonicalSchema, SchemaError> {
-    CanonicalSchema::from_json(tunnel_persistence_schema())
+    tunnel_persistence_schema()
 }
 
 /// Produce additive, deterministic PostgreSQL bootstrap DDL for review.
