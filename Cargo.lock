@@ -413,7 +413,7 @@ dependencies = [
 [[package]]
 name = "ftnl-lib-core"
 version = "0.1.0"
-source = "git+https://github.com/file-tunnel/ftnl-lib-core.git?rev=7d0745452d91073a1001d9d527805ac41826f6e5#7d0745452d91073a1001d9d527805ac41826f6e5"
+source = "git+https://github.com/file-tunnel/ftnl-lib-core.git?rev=a3b8be33cb70ffec0cf4547c338071654a7251ec#a3b8be33cb70ffec0cf4547c338071654a7251ec"
 dependencies = [
  "jsonschema",
  "serde",
