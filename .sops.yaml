@@ -8,3 +8,4 @@ creation_rules:
     key_groups:
       - age:
           - *op_alex_macbook
+          - age1txv6jzlds2s03advmdtnm5l93qh4rkqs50nwvzk9yfvsartzue8se8t7jv # offline recovery identity (fleet-wide)
