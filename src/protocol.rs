@@ -160,14 +160,21 @@ impl ProtocolState {
             && phase_consistency
     }
 
+    /// Return the next immutable protocol value or a typed rejection.
+    ///
+    /// Rejected transitions cannot mutate the input because the candidate is
+    /// consumed by value and returned only after every invariant still holds.
+    pub fn transition(self, action: ProtocolAction) -> Result<Self, TransitionError> {
+        let mut next = self;
+        next.apply_inner(action)?;
+        debug_assert!(next.invariants_hold());
+        Ok(next)
+    }
+
+    /// Compatibility boundary for callers that still own mutable storage.
     pub fn apply(&mut self, action: ProtocolAction) -> Result<(), TransitionError> {
-        let before = *self;
-        let result = self.apply_inner(action);
-        if result.is_err() {
-            *self = before;
-        }
-        debug_assert!(self.invariants_hold());
-        result
+        *self = self.transition(action)?;
+        Ok(())
     }
 
     fn apply_inner(&mut self, action: ProtocolAction) -> Result<(), TransitionError> {

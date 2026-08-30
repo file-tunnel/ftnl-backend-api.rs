@@ -4,6 +4,13 @@ The reference server proves protocol and authorization boundaries in one
 process. A production deployment should preserve those boundaries while
 splitting durability and byte transfer.
 
+The implementation follows a functional-core/effect-shell boundary: pure,
+typed protocol transitions and declaration decisions consume immutable inputs;
+Axum handlers own authentication, clocks, locks, identifiers, persistence, and
+event publication. Reactive libraries are intentionally reserved for clients
+with genuine asynchronous event streams rather than added to request/response
+Rust code without a stream-composition need.
+
 ```text
 desktop SDK ──create/snapshot/ticket──▶ API/control plane
       ▲                                  │ Redis/Postgres TTL state
