@@ -1,0 +1,13 @@
+# GENERATED from Dockerfile (sha256:f465f574e483e8bf) by ores-gha-workflows/scripts/render-dkf.mjs — target linux/arm64. Do not edit; edit Dockerfile and re-render.
+FROM --platform=linux/arm64 rust:1.96-bookworm AS build
+ARG TARGETARCH
+WORKDIR /src
+COPY Cargo.toml Cargo.lock* ./
+COPY src ./src
+RUN cargo build --locked --release
+
+FROM --platform=linux/arm64 gcr.io/distroless/cc-debian12:nonroot
+COPY --from=build /src/target/release/ftnl-backend-api /usr/local/bin/ftnl-backend-api
+EXPOSE 8080
+ENV FTNL_BIND=0.0.0.0:8080
+ENTRYPOINT ["/usr/local/bin/ftnl-backend-api"]
