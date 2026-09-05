@@ -4,6 +4,7 @@
 //! boundaries are the reusable part; production storage adapters can replace
 //! the maps and byte buffers without changing the HTTP contract.
 
+pub mod declaration;
 pub mod observability;
 pub mod persistence;
 pub mod protocol;
@@ -40,6 +41,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 use uuid::Uuid;
+
+use declaration::{validate_declaration, DeclarationPolicy, DeclarationRejection, FileDeclaration};
 
 const DEFAULT_MAX_FILES: u16 = 10;
 const DEFAULT_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
@@ -231,6 +234,23 @@ enum ApiError {
     TooLarge,
     #[error("media type is not accepted")]
     UnsupportedMedia,
+}
+
+impl From<DeclarationRejection> for ApiError {
+    fn from(rejection: DeclarationRejection) -> Self {
+        match rejection {
+            DeclarationRejection::InvalidName => {
+                Self::Invalid("name must be printable and at most 255 bytes")
+            }
+            DeclarationRejection::FileLimitReached | DeclarationRejection::FileTooLarge => {
+                Self::TooLarge
+            }
+            DeclarationRejection::UnsupportedMedia => Self::UnsupportedMedia,
+            DeclarationRejection::InvalidSha256 => {
+                Self::Invalid("sha256 must be 64 hexadecimal characters")
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -466,27 +486,24 @@ async fn declare_file(
     Json(request): Json<DeclareFileRequest>,
 ) -> Result<(StatusCode, Json<FileDescriptor>), ApiError> {
     let supplied = bearer_hash(&headers)?;
-    validate_filename(&request.name)?;
     let mut tunnels = state.inner.write().await;
     let tunnel = tunnels.get_mut(&tunnel_id).ok_or(ApiError::NotFound)?;
     ensure_active(tunnel)?;
     require_phone(tunnel, &supplied, protocol::Operation::DeclareFile)?;
-    if tunnel.files.len() >= usize::from(tunnel.max_files) {
-        return Err(ApiError::TooLarge);
-    }
-    if request.size_bytes > tunnel.max_file_bytes {
-        return Err(ApiError::TooLarge);
-    }
-    if !media_is_accepted(&tunnel.accept, &request.media_type) {
-        return Err(ApiError::UnsupportedMedia);
-    }
-    if let Some(digest) = &request.sha256 {
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(ApiError::Invalid(
-                "sha256 must be 64 hexadecimal characters",
-            ));
-        }
-    }
+    validate_declaration(
+        DeclarationPolicy {
+            current_files: tunnel.files.len(),
+            max_files: tunnel.max_files,
+            max_file_bytes: tunnel.max_file_bytes,
+            accepted_media: &tunnel.accept,
+        },
+        FileDeclaration {
+            name: &request.name,
+            media_type: &request.media_type,
+            size_bytes: request.size_bytes,
+            sha256: request.sha256.as_deref(),
+        },
+    )?;
     let _ = request.last_modified_ms;
     let descriptor = FileDescriptor {
         file_id: Uuid::new_v4(),
@@ -780,15 +797,6 @@ fn validate_create(request: &CreateTunnelRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_filename(name: &str) -> Result<(), ApiError> {
-    if name.is_empty() || name.len() > 255 || name.chars().any(|c| c == '\0' || c.is_control()) {
-        return Err(ApiError::Invalid(
-            "name must be printable and at most 255 bytes",
-        ));
-    }
-    Ok(())
-}
-
 fn ensure_active(tunnel: &Tunnel) -> Result<(), ApiError> {
     if tunnel.expires_at <= Utc::now() || tunnel.status == TunnelStatus::Expired {
         return Err(ApiError::Expired);
@@ -797,16 +805,6 @@ fn ensure_active(tunnel: &Tunnel) -> Result<(), ApiError> {
         return Err(ApiError::Conflict);
     }
     Ok(())
-}
-
-fn media_is_accepted(patterns: &[String], media_type: &str) -> bool {
-    patterns.iter().any(|pattern| {
-        pattern == "*/*"
-            || pattern == media_type
-            || pattern
-                .strip_suffix("/*")
-                .is_some_and(|prefix| media_type.starts_with(&format!("{prefix}/")))
-    })
 }
 
 fn bearer_hash(headers: &HeaderMap) -> Result<[u8; 32], ApiError> {
@@ -961,21 +959,6 @@ mod tests {
         let digest = token_hash(&value);
         assert!(hashes_equal(&digest, &token_hash(&value)));
         assert!(!hashes_equal(&digest, &token_hash("wrong")));
-    }
-
-    #[test]
-    fn media_patterns_are_explicit() {
-        let patterns = vec!["image/*".to_owned(), "application/pdf".to_owned()];
-        assert!(media_is_accepted(&patterns, "image/jpeg"));
-        assert!(media_is_accepted(&patterns, "application/pdf"));
-        assert!(!media_is_accepted(&patterns, "text/html"));
-    }
-
-    #[test]
-    fn filenames_cannot_hide_control_characters() {
-        assert!(validate_filename("IMG_0001.jpg").is_ok());
-        assert!(validate_filename("../IMG_0001.jpg").is_ok());
-        assert!(validate_filename("bad\nname.jpg").is_err());
     }
 
     #[test]
