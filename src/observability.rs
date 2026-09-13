@@ -2,10 +2,16 @@
 //!
 //! Transfer identifiers, pairing material, capabilities, tickets, filenames,
 //! request URLs, remote addresses, and file bytes are prohibited here.
+//!
+//! Builders returned here carry only a constant event name. Each call site
+//! attaches its own static `ores-trace-` literal and the enclosing function's
+//! `ores-routine-` constant before calling `send()`.
 
 use std::sync::Arc;
 
-use next_loggers::{json, JsonObject, Logger, LoggerError, OpenTelemetryTransport, Options, Value};
+use next_loggers::{
+    json, Event, JsonObject, Logger, LoggerError, OpenTelemetryTransport, Options, Value,
+};
 
 pub fn logger() -> Logger {
     let transport = Arc::new(OpenTelemetryTransport::new(|record| {
@@ -21,15 +27,28 @@ pub fn logger() -> Logger {
     Logger::new(options)
 }
 
-pub fn event(logger: &Logger, name: &'static str) {
-    let _ = logger
-        .info(vec![Value::String(name.into())])
+/// Build an informational, metadata-free lifecycle event.
+#[must_use]
+pub fn event(logger: &Logger, name: &'static str) -> Event {
+    metadata_free(logger.info(vec![Value::String(name.into())]), name)
+}
+
+/// Build a warning, metadata-free lifecycle failure event.
+///
+/// The underlying error is intentionally not attached: socket and server
+/// errors can embed addresses.
+#[must_use]
+pub fn failure(logger: &Logger, name: &'static str) -> Event {
+    metadata_free(logger.warn(vec![Value::String(name.into())]), name)
+}
+
+fn metadata_free(event: Event, name: &'static str) -> Event {
+    event
         .add_fields(JsonObject::from_iter([
             ("event.name".into(), json!(name)),
             ("data.classification".into(), json!("metadata-free")),
         ]))
         .add_tags(["file-tunnel", "backend"])
-        .send();
 }
 
 #[cfg(test)]
@@ -39,7 +58,8 @@ mod tests {
     #[test]
     fn logger_accepts_a_constant_metadata_free_event() {
         let logger = logger();
-        event(&logger, "backend.test");
+        let _ = event(&logger, "backend.test").send();
+        let _ = failure(&logger, "backend.test.failed").send();
         logger.close().unwrap();
     }
 }
