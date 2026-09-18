@@ -28,4 +28,5 @@ jobs:
         run: rustc -O -o "$RUNNER_TEMP/ores-trace-contract" .github/ores-trace-contract.rs
 
       - name: Verify static ORES trace markers
-        run: "$RUNNER_TEMP/ores-trace-contract" .
+        run: |
+          "$RUNNER_TEMP/ores-trace-contract" .
