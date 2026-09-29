@@ -56,11 +56,11 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1788457530,
-        "narHash": "sha256-QIIaqnwoHiYm4m658M11HssOhLQcGN4gW6ptu5fViGY=",
+        "lastModified": 1789527096,
+        "narHash": "sha256-dESG1H0HwhrRlzTR4qlrLdowwVJz9i2mtkGICQj/HRY=",
         "owner": "ORESoftware",
         "repo": "ores-sops",
-        "rev": "50ea46d109a9467c2247c6bc1eba63471c1a304f",
+        "rev": "6ccb82dff4a511f998bf723b8cca8392b31003be",
         "type": "github"
       },
       "original": {
