@@ -33,6 +33,6 @@ jobs:
         run: >-
           rustc --test -o "$RUNNER_TEMP/ores-trace-contract-test"
           .ores-trace-contract-source/.github/ores-trace-contract.rs &&
-          "$RUNNER_TEMP/ores-trace-contract-test"
+          command "$RUNNER_TEMP/ores-trace-contract-test"
       - name: Verify static ORES trace markers
         run: "$RUNNER_TEMP/ores-trace-contract" .
