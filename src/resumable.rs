@@ -149,6 +149,7 @@ pub struct AppendOutcome {
 pub struct UploadBuffer {
     total: u64,
     bytes: Vec<u8>,
+    empty_committed: bool,
 }
 
 impl UploadBuffer {
@@ -158,6 +159,7 @@ impl UploadBuffer {
         Self {
             total,
             bytes: Vec::new(),
+            empty_committed: false,
         }
     }
 
@@ -176,7 +178,7 @@ impl UploadBuffer {
     /// Reports whether every declared byte has been committed.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.offset() == self.total
+        self.offset() == self.total && (self.total != 0 || self.empty_committed)
     }
 
     /// Returns committed bytes in wire order.
@@ -205,6 +207,18 @@ impl UploadBuffer {
             return Err(UploadError::BodyLength {
                 expected: range.len(),
                 actual: chunk.len() as u64,
+            });
+        }
+
+        // A zero-byte upload has no offset change to mark a committed replay.
+        // Record its first successful empty PUT explicitly.
+        if self.total == 0 {
+            let replayed = self.empty_committed;
+            self.empty_committed = true;
+            return Ok(AppendOutcome {
+                offset: 0,
+                complete: true,
+                replayed,
             });
         }
 
@@ -448,6 +462,7 @@ mod tests {
     #[test]
     fn empty_legacy_upload_completes() {
         let mut upload = UploadBuffer::new(0);
+        assert!(!upload.is_complete(), "empty file is not committed before PUT");
         assert_eq!(
             upload.append(ContentRange::whole(0), b""),
             Ok(AppendOutcome {
@@ -455,6 +470,16 @@ mod tests {
                 complete: true,
                 replayed: false,
             })
+        );
+        assert!(upload.is_complete());
+        assert_eq!(
+            upload.append(ContentRange::whole(0), b""),
+            Ok(AppendOutcome {
+                offset: 0,
+                complete: true,
+                replayed: true,
+            }),
+            "empty retry cannot publish progress a second time",
         );
     }
 }
