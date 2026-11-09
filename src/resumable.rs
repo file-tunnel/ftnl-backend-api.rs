@@ -462,7 +462,10 @@ mod tests {
     #[test]
     fn empty_legacy_upload_completes() {
         let mut upload = UploadBuffer::new(0);
-        assert!(!upload.is_complete(), "empty file is not committed before PUT");
+        assert!(
+            !upload.is_complete(),
+            "empty file is not committed before PUT"
+        );
         assert_eq!(
             upload.append(ContentRange::whole(0), b""),
             Ok(AppendOutcome {
