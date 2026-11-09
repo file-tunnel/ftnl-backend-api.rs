@@ -598,8 +598,7 @@ async fn upload_file(
         // Verify the candidate final payload before mutating the upload
         // buffer. A bad final chunk must remain retryable at the same offset.
         if let Some(expected) = stored.expected_sha256 {
-            if range.start == stored.upload.offset()
-                && range.end_exclusive == stored.upload.total()
+            if range.start == stored.upload.offset() && range.end_exclusive == stored.upload.total()
             {
                 let mut hasher = Sha256::new();
                 hasher.update(stored.upload.as_slice());
@@ -926,14 +925,16 @@ fn token_hash(value: &str) -> [u8; 32] {
 
 fn decode_sha256(value: &str) -> Result<[u8; 32], ApiError> {
     if value.len() != 64 {
-        return Err(ApiError::Invalid("sha256 must be 64 hexadecimal characters"));
+        return Err(ApiError::Invalid(
+            "sha256 must be 64 hexadecimal characters",
+        ));
     }
     let mut result = [0_u8; 32];
     for (index, byte) in result.iter_mut().enumerate() {
         let start = index * 2;
-        let pair = value
-            .get(start..start + 2)
-            .ok_or(ApiError::Invalid("sha256 must be 64 hexadecimal characters"))?;
+        let pair = value.get(start..start + 2).ok_or(ApiError::Invalid(
+            "sha256 must be 64 hexadecimal characters",
+        ))?;
         *byte = u8::from_str_radix(pair, 16)
             .map_err(|_| ApiError::Invalid("sha256 must be 64 hexadecimal characters"))?;
     }
@@ -1071,7 +1072,6 @@ mod tests {
             .is_none());
     }
 
-
     fn phone_headers(value: &str, range: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1135,8 +1135,7 @@ mod tests {
                 size_bytes: 3,
                 last_modified_ms: None,
                 sha256: Some(
-                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-                        .to_owned(),
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_owned(),
                 ),
             }),
         )
@@ -1162,10 +1161,13 @@ mod tests {
         )
         .await;
         assert!(matches!(corrupt, Err(ApiError::DigestMismatch)));
-        let Json(state_after_reject) =
-            get_tunnel(State(state.clone()), Path(tunnel_id), phone_headers(&desktop, None))
-                .await
-                .unwrap();
+        let Json(state_after_reject) = get_tunnel(
+            State(state.clone()),
+            Path(tunnel_id),
+            phone_headers(&desktop, None),
+        )
+        .await
+        .unwrap();
         assert_eq!(state_after_reject.files[0].bytes_transferred, 2);
         assert_eq!(state_after_reject.files[0].status, FileStatus::Uploading);
         let offset = upload_status(
@@ -1198,10 +1200,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&bytes[..], b"abc");
-        let Json(done) =
-            get_tunnel(State(state), Path(tunnel_id), phone_headers(&desktop, None))
-                .await
-                .unwrap();
+        let Json(done) = get_tunnel(State(state), Path(tunnel_id), phone_headers(&desktop, None))
+            .await
+            .unwrap();
         assert_eq!(done.status, TunnelStatus::Complete);
     }
 
@@ -1218,8 +1219,7 @@ mod tests {
                 size_bytes: 0,
                 last_modified_ms: None,
                 sha256: Some(
-                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                        .to_owned(),
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
                 ),
             }),
         )
@@ -1247,7 +1247,10 @@ mod tests {
         .unwrap();
         assert_eq!(second.status(), StatusCode::NO_CONTENT);
         let after_replay = state.inner.read().await.get(&tunnel_id).unwrap().sequence;
-        assert_eq!(after_replay, after, "empty replay does not duplicate events");
+        assert_eq!(
+            after_replay, after,
+            "empty replay does not duplicate events"
+        );
     }
 
     #[test]
