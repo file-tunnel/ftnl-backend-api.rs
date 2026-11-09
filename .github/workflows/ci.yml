@@ -25,3 +25,8 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-targets
       - run: cargo build --locked --release
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Run actual HTTP checksum and zero-byte lifecycle integration
+        run: node tests/e2e/http-integrity.mjs
