@@ -67,10 +67,17 @@ and bytes are prohibited from those records.
 ```bash
 nix develop --command agent-check
 bash scripts/formal-check.sh all
+cargo build --locked --release && node tests/e2e/http-integrity.mjs
 ```
 
 `flake.lock` pins the complete developer toolchain. CI also runs the native
 Rust workflow so the Nix and upstream stable Rust paths remain compatible.
+The backend CI also starts the release binary over loopback and verifies the actual
+HTTP create/claim/declare/upload/checkpoint/download lifecycle, including
+SHA-256 mismatch recovery and zero-byte idempotent retries. These tests exercise
+this backend's exact PR head rather than the older revision pinned by the
+independent cross-browser File Tunnel E2E suite.
+
 The dedicated formal-methods workflow runs randomized Rust transition
 properties, Kani proofs over the production capability policy, and exhaustive
 TLC verification of the finite Quint model. See
