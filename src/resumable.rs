@@ -384,7 +384,10 @@ mod tests {
                 total: 3,
             },
         ] {
-            assert_eq!(upload.append(forged, b"abc"), Err(UploadError::InvalidRange));
+            assert_eq!(
+                upload.append(forged, b"abc"),
+                Err(UploadError::InvalidRange)
+            );
             assert_eq!(upload, original);
         }
     }
