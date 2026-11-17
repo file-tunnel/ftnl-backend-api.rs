@@ -762,9 +762,9 @@ fn upload_response(outcome: resumable::AppendOutcome) -> Response {
 
 fn map_upload_error(error: resumable::UploadError) -> ApiError {
     match error {
-        resumable::UploadError::BodyLength { .. } | resumable::UploadError::ChunkTooLarge => {
-            ApiError::InvalidRange(error.to_string())
-        }
+        resumable::UploadError::BodyLength { .. }
+        | resumable::UploadError::ChunkTooLarge
+        | resumable::UploadError::InvalidRange => ApiError::InvalidRange(error.to_string()),
         resumable::UploadError::TotalChanged { .. }
         | resumable::UploadError::Gap { .. }
         | resumable::UploadError::PartialOverlap { .. }

@@ -200,6 +200,12 @@ impl UploadBuffer {
                 actual: range.total,
             });
         }
+        // ContentRange has public fields: callers can construct a value
+        // without using its strict parser. Validate before subtraction and
+        // memory mutation to prevent underflow and over-commit.
+        if range.end_exclusive < range.start || range.end_exclusive > range.total {
+            return Err(UploadError::InvalidRange);
+        }
         let expected_len = usize::try_from(range.len()).map_err(|_| UploadError::ChunkTooLarge)?;
         if chunk.len() != expected_len {
             return Err(UploadError::BodyLength {
@@ -275,6 +281,7 @@ pub enum UploadError {
         end_exclusive: u64,
     },
     ChunkTooLarge,
+    InvalidRange,
 }
 
 impl Display for UploadError {
@@ -312,6 +319,9 @@ impl Display for UploadError {
             ),
             Self::ChunkTooLarge => {
                 formatter.write_str("range length cannot be represented by this server")
+            }
+            Self::InvalidRange => {
+                formatter.write_str("range boundaries are invalid for the declared upload")
             }
         }
     }
@@ -356,6 +366,30 @@ mod tests {
         );
         assert!(ContentRange::parse("bytes */10", 10).is_err());
         assert!(ContentRange::parse("bytes 01-9/10", 10).is_err());
+    }
+
+    #[test]
+    fn rejects_forged_ranges_without_mutating_committed_data() {
+        let mut upload = UploadBuffer::new(3);
+        let original = upload.clone();
+        for forged in [
+            ContentRange {
+                start: 2,
+                end_exclusive: 1,
+                total: 3,
+            },
+            ContentRange {
+                start: 0,
+                end_exclusive: 4,
+                total: 3,
+            },
+        ] {
+            assert_eq!(
+                upload.append(forged, b"abc"),
+                Err(UploadError::InvalidRange)
+            );
+            assert_eq!(upload, original);
+        }
     }
 
     #[test]
