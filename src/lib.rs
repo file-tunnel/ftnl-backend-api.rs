@@ -95,6 +95,7 @@ struct Tunnel {
 struct StoredFile {
     descriptor: FileDescriptor,
     upload: resumable::UploadBuffer,
+    expected_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -222,6 +223,8 @@ enum ApiError {
     InvalidRange(String),
     #[error("upload offset conflict: {0}")]
     UploadConflict(String),
+    #[error("uploaded bytes do not match the declared SHA-256")]
+    DigestMismatch,
     #[error("capability is missing or invalid")]
     Unauthorized,
     #[error("tunnel or file was not found")]
@@ -275,6 +278,11 @@ impl IntoResponse for ApiError {
                 StatusCode::CONFLICT,
                 "Upload offset conflict",
                 "upload_offset_conflict",
+            ),
+            Self::DigestMismatch => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Content integrity mismatch",
+                "content_hash_mismatch",
             ),
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
@@ -505,6 +513,7 @@ async fn declare_file(
         },
     )?;
     let _ = request.last_modified_ms;
+    let expected_sha256 = request.sha256.as_deref().map(decode_sha256).transpose()?;
     let descriptor = FileDescriptor {
         file_id: Uuid::new_v4(),
         name: request.name,
@@ -519,6 +528,7 @@ async fn declare_file(
         StoredFile {
             descriptor: descriptor.clone(),
             upload: resumable::UploadBuffer::new(descriptor.size_bytes),
+            expected_sha256,
         },
     );
     publish(
@@ -585,6 +595,20 @@ async fn upload_file(
     let (outcome, became_complete) = {
         let stored = tunnel.files.get_mut(&file_id).ok_or(ApiError::NotFound)?;
         let was_complete = stored.upload.is_complete();
+        // Verify the candidate final payload before mutating the upload
+        // buffer. A bad final chunk must remain retryable at the same offset.
+        if let Some(expected) = stored.expected_sha256 {
+            if range.start == stored.upload.offset() && range.end_exclusive == stored.upload.total()
+            {
+                let mut hasher = Sha256::new();
+                hasher.update(stored.upload.as_slice());
+                hasher.update(&bytes);
+                let actual: [u8; 32] = hasher.finalize().into();
+                if !hashes_equal(&actual, &expected) {
+                    return Err(ApiError::DigestMismatch);
+                }
+            }
+        }
         let outcome = stored
             .upload
             .append(range, &bytes)
@@ -899,6 +923,24 @@ fn token_hash(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
 }
 
+fn decode_sha256(value: &str) -> Result<[u8; 32], ApiError> {
+    if value.len() != 64 {
+        return Err(ApiError::Invalid(
+            "sha256 must be 64 hexadecimal characters",
+        ));
+    }
+    let mut result = [0_u8; 32];
+    for (index, byte) in result.iter_mut().enumerate() {
+        let start = index * 2;
+        let pair = value.get(start..start + 2).ok_or(ApiError::Invalid(
+            "sha256 must be 64 hexadecimal characters",
+        ))?;
+        *byte = u8::from_str_radix(pair, 16)
+            .map_err(|_| ApiError::Invalid("sha256 must be 64 hexadecimal characters"))?;
+    }
+    Ok(result)
+}
+
 fn hashes_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
     bool::from(left.ct_eq(right))
 }
@@ -1028,6 +1070,187 @@ mod tests {
             .headers()
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .is_none());
+    }
+
+    fn phone_headers(value: &str, range: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {value}")).unwrap(),
+        );
+        if let Some(range) = range {
+            headers.insert(header::CONTENT_RANGE, HeaderValue::from_str(range).unwrap());
+        }
+        headers
+    }
+
+    async fn claimed_fixture() -> (AppState, Uuid, String, String) {
+        let state = AppState::default();
+        let (_, Json(created)) = create_tunnel(
+            State(state.clone()),
+            Json(CreateTunnelRequest {
+                application_id: "checksum-e2e".to_owned(),
+                accept: default_accept(),
+                max_files: default_max_files(),
+                max_file_bytes: default_max_file_bytes(),
+                expires_in_seconds: default_expires_seconds(),
+            }),
+        )
+        .await
+        .unwrap();
+        let pairing_secret = created
+            .pairing_uri
+            .split_once("#c=")
+            .expect("fragment secret")
+            .1
+            .to_owned();
+        let Json(phone) = claim_tunnel(
+            State(state.clone()),
+            Path(created.tunnel_id),
+            Json(ClaimTunnelRequest {
+                pairing_secret,
+                device_label: None,
+            }),
+        )
+        .await
+        .unwrap();
+        (
+            state,
+            created.tunnel_id,
+            created.desktop_capability,
+            phone.phone_capability,
+        )
+    }
+
+    #[tokio::test]
+    async fn checksum_rejects_corrupt_final_chunk_without_consuming_resume_offset() {
+        let (state, tunnel_id, desktop, phone) = claimed_fixture().await;
+        let (status, Json(file)) = declare_file(
+            State(state.clone()),
+            Path(tunnel_id),
+            phone_headers(&phone, None),
+            Json(DeclareFileRequest {
+                name: "hello.jpg".to_owned(),
+                media_type: "image/jpeg".to_owned(),
+                size_bytes: 3,
+                last_modified_ms: None,
+                sha256: Some(
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_owned(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let file_id = file.file_id;
+        let partial = upload_file(
+            State(state.clone()),
+            Path((tunnel_id, file_id)),
+            phone_headers(&phone, Some("bytes 0-1/3")),
+            Body::from("ab"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(partial.status(), StatusCode::PERMANENT_REDIRECT);
+
+        let corrupt = upload_file(
+            State(state.clone()),
+            Path((tunnel_id, file_id)),
+            phone_headers(&phone, Some("bytes 2-2/3")),
+            Body::from("x"),
+        )
+        .await;
+        assert!(matches!(corrupt, Err(ApiError::DigestMismatch)));
+        let Json(state_after_reject) = get_tunnel(
+            State(state.clone()),
+            Path(tunnel_id),
+            phone_headers(&desktop, None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state_after_reject.files[0].bytes_transferred, 2);
+        assert_eq!(state_after_reject.files[0].status, FileStatus::Uploading);
+        let offset = upload_status(
+            State(state.clone()),
+            Path((tunnel_id, file_id)),
+            phone_headers(&phone, None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(offset.headers().get(UPLOAD_OFFSET).unwrap(), "2");
+
+        let accepted = upload_file(
+            State(state.clone()),
+            Path((tunnel_id, file_id)),
+            phone_headers(&phone, Some("bytes 2-2/3")),
+            Body::from("c"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+        let content = download_file(
+            State(state.clone()),
+            Path((tunnel_id, file_id)),
+            phone_headers(&desktop, None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(content.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(content.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"abc");
+        let Json(done) = get_tunnel(State(state), Path(tunnel_id), phone_headers(&desktop, None))
+            .await
+            .unwrap();
+        assert_eq!(done.status, TunnelStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn empty_upload_emits_one_availability_transition_and_exact_replay_is_quiet() {
+        let (state, tunnel_id, _desktop, phone) = claimed_fixture().await;
+        let (_, Json(file)) = declare_file(
+            State(state.clone()),
+            Path(tunnel_id),
+            phone_headers(&phone, None),
+            Json(DeclareFileRequest {
+                name: "empty.jpg".to_owned(),
+                media_type: "image/jpeg".to_owned(),
+                size_bytes: 0,
+                last_modified_ms: None,
+                sha256: Some(
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+        let before = state.inner.read().await.get(&tunnel_id).unwrap().sequence;
+        let first = upload_file(
+            State(state.clone()),
+            Path((tunnel_id, file.file_id)),
+            phone_headers(&phone, None),
+            Body::empty(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status(), StatusCode::NO_CONTENT);
+        let after = state.inner.read().await.get(&tunnel_id).unwrap().sequence;
+        assert_eq!(after, before + 2, "one progress and one available notice");
+        let second = upload_file(
+            State(state.clone()),
+            Path((tunnel_id, file.file_id)),
+            phone_headers(&phone, None),
+            Body::empty(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.status(), StatusCode::NO_CONTENT);
+        let after_replay = state.inner.read().await.get(&tunnel_id).unwrap().sequence;
+        assert_eq!(
+            after_replay, after,
+            "empty replay does not duplicate events"
+        );
     }
 
     #[test]
